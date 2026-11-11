@@ -1,0 +1,10 @@
+# Raspberry Pi 4B / Python 3.13 (venv com pacotes do sistema quando necessario)
+fastapi
+uvicorn
+streamlit
+requests
+gpiozero
+mfrc522
+spidev
+# lgpio: preferir 'sudo apt install python3-lgpio' no Raspberry,
+# com venv criado usando --system-site-packages, ou manter o lgpio já funcional.

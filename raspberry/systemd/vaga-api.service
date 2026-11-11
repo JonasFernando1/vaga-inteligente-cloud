@@ -1,0 +1,17 @@
+[Unit]
+Description=Vaga Inteligente API (FastAPI + RFID + IR + cancela)
+After=network.target
+
+[Service]
+Type=simple
+User=vaga
+WorkingDirectory=/home/vaga/vaga-inteligente
+ExecStart=/home/vaga/vaga-inteligente/venv/bin/python -m uvicorn api:app --host 127.0.0.1 --port 8000 --workers 1
+Restart=on-failure
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+# Modos de fechamento SEM SENSOR ficam desligados por padrao.
+# Nunca habilite modo sem sensor como configuracao permanente de boot.
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,30 @@
+# Segredos e configuracoes locais
+.env
+.env.*
+!.env.example
+.streamlit/secrets.toml
+**/.streamlit/secrets.toml
+*.key
+*.pem
+
+# Python
+venv/
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Banco operacional e backups (dados nunca vao para Git)
+**/dados/
+**/backups/
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+
+# IDE e sistema
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
