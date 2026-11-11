@@ -1,19 +1,20 @@
-"""RC522 com reconexão: falhas no boot não derrubam a API.
+"""Leitor RC522: abre por cartao autorizado e agenda fechamento apos 10s.
 
-Cartão autorizado abre a cancela. Fechamento após 10s só ocorre no modo
-provisório de bancada explicitamente habilitado no controlador.py.
+Antirrepeticao: um cartao mantido sobre o leitor nao reinicia a contagem.
+Uma nova aproximacao exige que ele fique ausente pelo menos 1 segundo.
 """
+
 import logging
 import threading
 from datetime import datetime
 from time import monotonic
 
+from mfrc522 import SimpleMFRC522
 from banco import conectar, registrar_evento
 from controlador import comandar_cancela, agendar_fechamento_rfid
 
 log = logging.getLogger("rfid")
 INTERVALO = 0.15
-TEMPO_RECONEXAO = 3.0
 AUSENCIA_PARA_NOVA_LEITURA = 1.5
 
 
@@ -30,16 +31,14 @@ class MonitorRFID:
         self.ultima_leitura = None
         self.cartao_presente = None
         self.ultima_presenca = 0.0
-        self.leitor_conectado = False
-        self.ultimo_erro = None
-        self.tentativas_reconexao = 0
 
     def iniciar(self):
         if self.thread and self.thread.is_alive():
             return
+        self.leitor = SimpleMFRC522()
         self.parar.clear()
         self.thread = threading.Thread(
-            target=self.executar, name="monitor-rfid", daemon=True
+            target=self.executar, daemon=True, name="monitor-rfid"
         )
         self.thread.start()
 
@@ -53,8 +52,7 @@ class MonitorRFID:
             ).fetchone()[0]
 
         if not cartao or not cartao["autorizado"]:
-            nome = cartao["nome"] if cartao else "Desconhecido"
-            status, mensagem = "NEGADO", "Cartão não autorizado"
+            nome, status, mensagem = "Desconhecido", "NEGADO", "Cartão não autorizado"
         elif lotacao >= 2:
             nome, status, mensagem = cartao["nome"], "LOTADO", "Estacionamento lotado"
         else:
@@ -64,43 +62,28 @@ class MonitorRFID:
                 agendado = agendar_fechamento_rfid()
                 status = "AUTORIZADO"
                 mensagem = (
-                    "Acesso autorizado; fechamento de bancada em 10s agendado"
-                    if agendado else
-                    "Acesso autorizado; fechamento automático sem sensor desabilitado"
+                    "Acesso autorizado; fechamento agendado em 10s "
+                    "(TESTE DE BANCADA SEM SENSOR)."
+                    if agendado else "Acesso autorizado; sem fechamento automático habilitado."
                 )
             else:
                 status = "FALHA_ABERTURA"
-                mensagem = "Cartão autorizado, mas " + resultado.get("mensagem", "falhou")
+                mensagem = "Cartão autorizado, mas " + resultado["mensagem"]
 
         leitura = {
-            "uid": uid, "nome": nome, "status": status,
-            "mensagem": mensagem, "horario": agora(),
+            "uid": uid,
+            "nome": nome,
+            "status": status,
+            "mensagem": mensagem,
+            "horario": agora(),
         }
         registrar_evento("RFID", f"{mensagem} | {nome} | UID: {uid}")
         with self.lock:
             self.ultima_leitura = leitura
-        log.info("RFID lido: status=%s", status)
+        log.info("RFID: %s - %s", uid, status)
 
     def executar(self):
-        # Inicialização NO thread permite que a API suba mesmo quando
-        # o SPI/RC522 ainda não estiver pronto após o boot.
         while not self.parar.is_set():
-            if self.leitor is None:
-                try:
-                    from mfrc522 import SimpleMFRC522
-                    self.leitor = SimpleMFRC522()
-                    with self.lock:
-                        self.leitor_conectado = True
-                        self.ultimo_erro = None
-                    log.info("RC522 inicializado")
-                except Exception as erro:
-                    log.exception("Não foi possível iniciar RC522; nova tentativa em 3s")
-                    with self.lock:
-                        self.leitor_conectado = False
-                        self.ultimo_erro = f"{type(erro).__name__}: {erro}"
-                        self.tentativas_reconexao += 1
-                    self.parar.wait(TEMPO_RECONEXAO)
-                    continue
             try:
                 uid_lido = self.leitor.read_id_no_block()
                 instante = monotonic()
@@ -113,40 +96,27 @@ class MonitorRFID:
                     if uid != self.cartao_presente:
                         self.cartao_presente = uid
                         self.processar(uid)
-                        # Ignora o tempo que o SG90 levou para mover a haste.
+                        # Nao contabilizar o tempo gasto abrindo o servo
+                        # como se o cartao tivesse sido retirado.
                         self.ultima_presenca = monotonic()
-            except Exception as erro:
-                log.exception("Falha de leitura RC522; tentando reconectar")
-                with self.lock:
-                    self.leitor_conectado = False
-                    self.ultimo_erro = f"{type(erro).__name__}: {erro}"
-                    self.tentativas_reconexao += 1
-                self.leitor = None
-                self.cartao_presente = None
-                self.parar.wait(TEMPO_RECONEXAO)
-                continue
+            except Exception:
+                log.exception("Falha na leitura/processamento de cartão")
+                self.parar.wait(1.0)
             self.parar.wait(INTERVALO)
-        self.leitor = None
-        with self.lock:
-            self.leitor_conectado = False
 
     def encerrar(self):
         self.parar.set()
         if self.thread:
-            self.thread.join(timeout=5)
-        # Nunca executar GPIO.cleanup() global: IR e servo compartilham GPIOs.
+            self.thread.join(timeout=3)
+        # Nao executar GPIO.cleanup() global.
 
     def status(self):
         with self.lock:
-            return {
-                "monitor_ativo": bool(self.thread and self.thread.is_alive()),
-                "leitor_conectado": self.leitor_conectado,
-                "ultimo_erro": self.ultimo_erro,
-                "tentativas_reconexao": self.tentativas_reconexao,
-                "ultima_leitura": (
-                    dict(self.ultima_leitura) if self.ultima_leitura else None
-                ),
-            }
+            ultima = dict(self.ultima_leitura) if self.ultima_leitura else None
+        return {
+            "monitor_ativo": bool(self.thread and self.thread.is_alive()),
+            "ultima_leitura": ultima,
+        }
 
 
 monitor_rfid = MonitorRFID()

@@ -1,15 +1,22 @@
-"""Leitura das vagas por IR: BCM17 e BCM27 (LOW = ocupada).
 
-Sem sensor/sem GPIO válido não altera vagas no banco.
-"""
 import logging
 import threading
-from time import monotonic
+from time import monotonic, sleep
 
-from banco import atualizar_vaga
+from gpiozero import DigitalInputDevice
+from banco import atualizar_vaga, listar_vagas
 
-log = logging.getLogger("sensores-ir")
-PINOS = {1: 17, 2: 27}
+logging.basicConfig(level=logging.INFO)
+log = logging.getLogger("sensores_ir")
+
+# BCM: GPIO 17 = vaga 1; GPIO 27 = vaga 2
+# False significa que LOW (0) representa ocupação.
+# A polaridade do sensor 2 ainda precisa ser confirmada.
+CONFIG = {
+    1: {"gpio": 17, "ocupado_em_high": False},
+    2: {"gpio": 27, "ocupado_em_high": False},
+}
+
 INTERVALO = 0.1
 DEBOUNCE = 0.5
 
@@ -19,50 +26,83 @@ class MonitorIR:
         self.parar = threading.Event()
         self.thread = None
         self.sensores = {}
-        self.lock = threading.Lock()
-        self.estados = {1: None, 2: None}
-        self.erro = None
+        self.estavel = {}
+        self.candidato = {}
+        self.desde = {}
 
     def iniciar(self):
         if self.thread and self.thread.is_alive():
             return
+
+        try:
+            for vaga, config in CONFIG.items():
+                self.sensores[vaga] = DigitalInputDevice(
+                    config["gpio"],
+                    pull_up=False
+                )
+        except Exception:
+            for sensor in self.sensores.values():
+                sensor.close()
+            self.sensores.clear()
+            raise
+
         self.parar.clear()
-        self.thread = threading.Thread(target=self.executar, name="monitor-ir", daemon=True)
+        self.thread = threading.Thread(
+            target=self.executar,
+            daemon=True,
+            name="monitor-ir"
+        )
         self.thread.start()
+
+    def ler(self, vaga):
+        nivel = bool(self.sensores[vaga].value)
+        return nivel == CONFIG[vaga]["ocupado_em_high"]
 
     def executar(self):
         try:
-            from gpiozero import DigitalInputDevice
-            for vaga_id, pino in PINOS.items():
-                self.sensores[vaga_id] = DigitalInputDevice(pino, pull_up=False)
-            candidatos = {}
-            alterados_em = {}
+            # Lê o estado inicial e aguarda estabilização.
+            for vaga in CONFIG:
+                self.candidato[vaga] = self.ler(vaga)
+                self.desde[vaga] = monotonic()
+                self.estavel[vaga] = None
+
             while not self.parar.is_set():
                 instante = monotonic()
-                for vaga_id, sensor in self.sensores.items():
-                    # Pino LOW = carro na vaga; HIGH = vaga livre.
-                    ocupado = not bool(sensor.value)
-                    if candidatos.get(vaga_id) != ocupado:
-                        candidatos[vaga_id] = ocupado
-                        alterados_em[vaga_id] = instante
-                    elif instante - alterados_em.get(vaga_id, instante) >= DEBOUNCE:
-                        with self.lock:
-                            anterior = self.estados[vaga_id]
-                        if anterior is None or ocupado != anterior:
-                            atualizar_vaga(vaga_id, ocupado)
-                            with self.lock:
-                                self.estados[vaga_id] = ocupado
+
+                for vaga in CONFIG:
+                    leitura = self.ler(vaga)
+
+                    if leitura != self.candidato[vaga]:
+                        self.candidato[vaga] = leitura
+                        self.desde[vaga] = instante
+
+                    if (
+                        instante - self.desde[vaga] >= DEBOUNCE
+                        and leitura != self.estavel[vaga]
+                    ):
+                        # Só atualiza o estado confirmado.
+                        try:
+                            alterou = atualizar_vaga(vaga, leitura)
+                            self.estavel[vaga] = leitura
+
+                            if alterou:
+                                log.info(
+                                    "Vaga %s: %s",
+                                    vaga,
+                                    "OCUPADA" if leitura else "LIVRE"
+                                )
+                        except Exception:
+                            log.exception(
+                                "Erro ao atualizar vaga %s", vaga
+                            )
+
                 self.parar.wait(INTERVALO)
-        except Exception as erro:
-            with self.lock:
-                self.erro = str(erro)
-            log.exception("Monitor de IR interrompido")
+
+        except Exception:
+            log.exception("Falha no monitoramento IR")
         finally:
             for sensor in self.sensores.values():
-                try:
-                    sensor.close()
-                except Exception:
-                    pass
+                sensor.close()
             self.sensores.clear()
 
     def encerrar(self):
@@ -71,13 +111,12 @@ class MonitorIR:
             self.thread.join(timeout=3)
 
     def status(self):
-        with self.lock:
-            return {
-                "monitor_ativo": bool(self.thread and self.thread.is_alive()),
-                "pinos_bcm": PINOS,
-                "vagas_ocupadas_por_ir": dict(self.estados),
-                "ultimo_erro": self.erro,
-            }
+        return {
+            "monitor_ativo": bool(
+                self.thread and self.thread.is_alive()
+            ),
+            "vagas": listar_vagas()
+        }
 
 
 monitor_ir = MonitorIR()

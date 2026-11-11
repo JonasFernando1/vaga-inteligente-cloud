@@ -29,3 +29,6 @@ __pycache__/
 .idea/
 .DS_Store
 Thumbs.db
+
+# Cópia local do código do Raspberry (contém .env e banco)
+raspberry-remoto/
