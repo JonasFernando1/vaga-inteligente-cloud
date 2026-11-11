@@ -25,6 +25,24 @@ STATUS_COMANDO = {
     "erro": "❌ erro",
 }
 
+STATUS_RFID = {
+    "AUTORIZADO": "✅ AUTORIZADO",
+    "NEGADO": "⛔ NEGADO",
+    "LOTADO": "🅿️ LOTADO",
+    "FALHA_ABERTURA": "⚠️ FALHA NA ABERTURA",
+}
+
+ESTADO_AUTO = {
+    "inativo": "inativo",
+    "contagem_10_segundos": "contagem para fechar",
+    "fechado_teste_bancada": "fechou sozinho (teste de bancada)",
+    "cancelado_pelo_dashboard": "cancelado por um comando manual",
+    "reagendado": "reagendado por um novo cartão",
+    "cancelado_posicao_alterada": "cancelado (a cancela mudou de posição)",
+    "desabilitado_ou_sessao_expirada": "desabilitado ou janela de teste expirada",
+    "bloqueado": "bloqueado",
+}
+
 
 class SessaoExpirada(Exception):
     pass
@@ -63,11 +81,33 @@ def buscar_vagas():
 
 @st.cache_data(ttl=2)
 def buscar_status_sistema():
-    linhas = consultar("status_sistema", {
-        "select": "pi_visto_em,api_online,cancela_aberta,fechamento_habilitado",
-        "id": "eq.1"
-    })
+    linhas = consultar("status_sistema", {"select": "*", "id": "eq.1"})
     return linhas[0] if linhas else None
+
+
+@st.cache_data(ttl=5)
+def buscar_permanencias(limite=25):
+    return consultar("permanencias", {
+        "select": "vaga_id,entrada,saida,duracao_segundos",
+        "order": "saida.desc",
+        "limit": limite
+    })
+
+
+def buscar_eventos(token, limite=25):
+    return consultar("eventos", {
+        "select": "horario,tipo,descricao",
+        "order": "horario.desc,id_local.desc",
+        "limit": limite
+    }, token)
+
+
+def buscar_ultima_leitura(token):
+    linhas = consultar("status_privado", {
+        "select": "rfid_ultima_leitura",
+        "id": "eq.1"
+    }, token)
+    return linhas[0]["rfid_ultima_leitura"] if linhas else None
 
 
 def buscar_comandos(token, limite=5):
@@ -118,6 +158,12 @@ def sessao_atual():
     return sessao
 
 
+def sessao_expirou():
+    st.session_state.pop("sessao", None)
+    st.session_state["aviso_login"] = "Sua sessão expirou. Entre de novo."
+    st.rerun()
+
+
 # ---------------------------------------------------------------------------
 # Utilitários
 # ---------------------------------------------------------------------------
@@ -127,21 +173,19 @@ def ler_data(texto):
     return datetime.fromisoformat(texto.replace("Z", "+00:00"))
 
 
+def formatar_duracao(segundos):
+    segundos = max(0, int(segundos or 0))
+    horas, resto = divmod(segundos, 3600)
+    minutos, segundos = divmod(resto, 60)
+    return f"{horas:02d}:{minutos:02d}:{segundos:02d}"
+
+
 def tempo_permanencia(entrada):
     inicio = ler_data(entrada)
     if not inicio:
         return "00:00:00"
-
     agora = datetime.now().astimezone()
-
-    segundos = max(
-        0, int((agora - inicio).total_seconds())
-    )
-
-    horas, resto = divmod(segundos, 3600)
-    minutos, segundos = divmod(resto, 60)
-
-    return f"{horas:02d}:{minutos:02d}:{segundos:02d}"
+    return formatar_duracao((agora - inicio).total_seconds())
 
 
 def hora_local(texto):
@@ -165,17 +209,17 @@ with st.sidebar:
     sessao = sessao_atual()
     if sessao:
         st.success(f"Conectado como {sessao['email']}")
-        if st.button("Sair", use_container_width=True):
+        if st.button("Sair", width="stretch"):
             st.session_state.pop("sessao", None)
             st.rerun()
     else:
         if aviso := st.session_state.pop("aviso_login", None):
             st.warning(aviso)
-        st.caption("Entre para controlar a cancela.")
+        st.caption("Entre para controlar a cancela e ver os eventos e cartões RFID.")
         with st.form("login"):
             email = st.text_input("E-mail")
             senha = st.text_input("Senha", type="password")
-            if st.form_submit_button("Entrar", use_container_width=True):
+            if st.form_submit_button("Entrar", width="stretch"):
                 try:
                     nova = entrar(email.strip(), senha)
                 except requests.RequestException as erro:
@@ -209,7 +253,7 @@ def monitoramento():
     else:
         st.error(
             f"🔴 Raspberry offline: último sinal há {int(segundos // 60)} min "
-            f"{int(segundos % 60)} s. As vagas abaixo podem estar desatualizadas."
+            f"{int(segundos % 60)} s. As informações abaixo podem estar desatualizadas."
         )
 
     if not vagas:
@@ -242,17 +286,25 @@ def monitoramento():
                 st.metric("Tempo estacionado", "00:00:00")
 
 
-@st.fragment(run_every="3s")
-def cancela():
-    st.subheader("🚧 Cancela")
-    try:
-        sistema = buscar_status_sistema()
-    except Exception as erro:
-        st.error(f"Falha de comunicação: {erro}")
+def mostrar_fechamento_auto(sistema):
+    estado = sistema.get("auto_estado")
+    if not estado:
         return
+    texto = ESTADO_AUTO.get(estado, estado)
+    fecha_em = ler_data(sistema.get("auto_fecha_em"))
+    if estado == "contagem_10_segundos" and fecha_em:
+        restante = max(0, int((fecha_em - datetime.now().astimezone()).total_seconds()))
+        texto = f"fecha em {restante} s"
+    st.write("Fechamento RFID:", texto)
+    if sistema.get("auto_modo_bancada"):
+        st.warning("Modo sem ultrassônico: exclusivo para bancada sem veículos ou pessoas.")
+    else:
+        st.info("Fechamento sem ultrassônico desabilitado.")
 
-    online, _ = pi_online(sistema)
-    aberta = sistema.get("cancela_aberta") if sistema else None
+
+def mostrar_cancela(sistema, online, sessao):
+    st.subheader("🚧 Cancela SG90")
+    aberta = sistema.get("cancela_aberta")
     if not online:
         st.write("Posição: desconhecida (Raspberry offline)")
     elif not sistema.get("api_online"):
@@ -262,38 +314,29 @@ def cancela():
     else:
         st.write("Posição:", "**ABERTA**" if aberta else "**FECHADA**")
     st.caption("Posição comandada: o SG90 não tem sensor que confirme onde a haste parou.")
+    if online and sistema.get("api_online"):
+        mostrar_fechamento_auto(sistema)
 
-    sessao = sessao_atual()
     if not sessao:
         st.info("Entre pela barra lateral para abrir ou fechar a cancela.")
         return
 
     pode_mandar = online and bool(sistema.get("api_online"))
-    fechamento = bool(sistema.get("fechamento_habilitado")) if sistema else False
+    fechamento = bool(sistema.get("fechamento_habilitado"))
 
     st.warning("Só acione com a trajetória da haste livre: o sensor ultrassônico ainda não protege a cancela.")
     b1, b2 = st.columns(2)
-    try:
-        if b1.button("⬆️ Abrir", use_container_width=True, disabled=not pode_mandar):
-            pedir_comando(sessao["token"], "abrir")
-            st.toast("Pedido de abrir enviado ao Raspberry")
-        if b2.button("⬇️ Fechar", use_container_width=True,
-                     disabled=not (pode_mandar and fechamento)):
-            pedir_comando(sessao["token"], "fechar")
-            st.toast("Pedido de fechar enviado ao Raspberry")
-        if pode_mandar and not fechamento:
-            st.caption("Fechar está desligado no Raspberry (modo de teste VAGA_FECHAMENTO_TESTE).")
+    if b1.button("⬆️ Abrir", width="stretch", disabled=not pode_mandar):
+        pedir_comando(sessao["token"], "abrir")
+        st.toast("Pedido de abrir enviado ao Raspberry")
+    if b2.button("⬇️ Fechar", width="stretch",
+                 disabled=not (pode_mandar and fechamento)):
+        pedir_comando(sessao["token"], "fechar")
+        st.toast("Pedido de fechar enviado ao Raspberry")
+    if pode_mandar and not fechamento:
+        st.caption("Fechar está desligado no Raspberry (modo de teste VAGA_FECHAMENTO_TESTE).")
 
-        comandos = buscar_comandos(sessao["token"])
-    except SessaoExpirada:
-        st.session_state.pop("sessao", None)
-        st.session_state["aviso_login"] = "Sua sessão expirou. Entre de novo."
-        st.rerun()
-        return
-    except requests.RequestException as erro:
-        st.error(f"Falha ao enviar ou consultar comandos: {erro}")
-        return
-
+    comandos = buscar_comandos(sessao["token"])
     if comandos:
         st.write("Últimos comandos")
         for c in comandos:
@@ -306,8 +349,98 @@ def cancela():
             st.markdown(linha)
 
 
+def mostrar_rfid(sistema, online, sessao):
+    st.subheader("💳 Cartão RFID")
+    if not online:
+        st.write("Leitor: desconhecido (Raspberry offline)")
+    elif sistema.get("rfid_monitor_ativo") is None:
+        st.write("Leitor: sem informação do Raspberry")
+    else:
+        st.write("Monitor:", "rodando" if sistema.get("rfid_monitor_ativo") else "parado")
+        st.write("Leitor RC522:", "conectado" if sistema.get("rfid_leitor_conectado") else "indisponível")
+        if sistema.get("rfid_ultimo_erro"):
+            st.caption("Último erro: " + str(sistema["rfid_ultimo_erro"]))
+
+    if not sessao:
+        st.info("Entre pela barra lateral para ver o último cartão lido.")
+        return
+
+    leitura = buscar_ultima_leitura(sessao["token"])
+    if leitura:
+        st.write("Último cartão:", f"**{leitura.get('nome') or '-'}**")
+        st.write("Status:", STATUS_RFID.get(leitura.get("status"), leitura.get("status")))
+        st.caption(f"{leitura.get('mensagem', '')} · {hora_local(leitura.get('horario'))}")
+    else:
+        st.caption("Nenhum cartão lido ainda.")
+
+
+@st.fragment(run_every="3s")
+def painel():
+    try:
+        sistema = buscar_status_sistema() or {}
+    except Exception as erro:
+        st.error(f"Falha de comunicação: {erro}")
+        return
+    online, _ = pi_online(sistema)
+    sessao = sessao_atual()
+
+    col_cancela, col_rfid = st.columns(2)
+    try:
+        with col_cancela:
+            mostrar_cancela(sistema, online, sessao)
+        with col_rfid:
+            mostrar_rfid(sistema, online, sessao)
+    except SessaoExpirada:
+        sessao_expirou()
+    except requests.RequestException as erro:
+        st.error(f"Falha de comunicação: {erro}")
+
+
+@st.fragment(run_every="10s")
+def historico():
+    with st.expander("📜 Eventos e histórico", expanded=True):
+        st.write("**Permanências encerradas**")
+        try:
+            permanencias = buscar_permanencias()
+        except requests.RequestException as erro:
+            st.warning(f"Histórico indisponível: {erro}")
+            permanencias = None
+        if permanencias:
+            st.dataframe([{
+                "Vaga": p["vaga_id"],
+                "Entrada": hora_local(p["entrada"]),
+                "Saída": hora_local(p["saida"]),
+                "Duração": formatar_duracao(p["duracao_segundos"]),
+            } for p in permanencias], width="stretch", hide_index=True)
+        elif permanencias is not None:
+            st.caption("Nenhuma permanência encerrada ainda.")
+
+        st.write("**Últimos eventos**")
+        sessao = sessao_atual()
+        if not sessao:
+            st.info("Entre pela barra lateral para ver os eventos (incluem nomes dos cartões).")
+            return
+        try:
+            eventos = buscar_eventos(sessao["token"])
+        except SessaoExpirada:
+            sessao_expirou()
+            return
+        except requests.RequestException as erro:
+            st.warning(f"Eventos indisponíveis: {erro}")
+            return
+        if eventos:
+            st.dataframe([{
+                "Horário": hora_local(e["horario"]),
+                "Tipo": e["tipo"],
+                "Descrição": e["descricao"],
+            } for e in eventos], width="stretch", hide_index=True)
+        else:
+            st.caption("Nenhum evento ainda.")
+
+
 monitoramento()
 st.divider()
-cancela()
+painel()
 st.divider()
+historico()
 st.caption("Dados recebidos do banco online.")

@@ -57,6 +57,7 @@ vaga-inteligente-cloud-main/
 | Dashboard online consultando Supabase | Implementado (`dashboard.py`); tabelas em `supabase/schema.sql` |
 | Publicar vagas e status no Supabase | Implementado (`raspberry/sincronizador.py`, serviço `vaga-sync`) |
 | Abrir/fechar a cancela pelo dashboard online | Implementado com login; passa pelas mesmas travas da API local |
+| RFID, eventos e permanências no dashboard online | Implementado; eventos e último cartão só com login (têm nomes) |
 
 ### Segurança da cancela
 
@@ -83,11 +84,13 @@ para o servo, com terra comum ao Raspberry, e proteja a trajetória da haste.
 
 ```text
 Raspberry: api.py ◀─HTTP─ sincronizador.py ──▶ Supabase ◀── dashboard.py (Streamlit Cloud)
-                          (vaga-sync)          status_vagas, status_sistema, comandos_cancela
+                          (vaga-sync)          status_vagas, status_sistema, comandos_cancela,
+                                               eventos, permanencias, status_privado
 ```
 
-- O **sincronizador** é um processo separado: lê a API local (`/vagas` e
-  `/cancela/status`), envia ao Supabase e manda um sinal de vida a cada 10 s.
+- O **sincronizador** é um processo separado: lê a API local (`/vagas`,
+  `/cancela/status`, `/rfid/status`, `/eventos` e `/permanencias`), envia ao
+  Supabase o que mudou e manda um sinal de vida a cada 10 s.
   Não usa GPIO nem o SQLite; se a internet cair, sensores e cancela seguem
   funcionando.
 - **Cancela pelo dashboard:** o usuário logado cria um comando em
@@ -121,7 +124,8 @@ python raspberry/sincronizador.py      # terminal 2: mesma ponte que roda no Pi
 streamlit run dashboard.py             # terminal 3: dashboard em localhost:8501
 ```
 
-No terminal do simulador, digite `1` ou `2` + Enter para trocar a vaga.
+No terminal do simulador, digite `1` ou `2` + Enter para trocar a vaga e `c` +
+Enter para passar um cartão (falso). `--bancada` imita o fechamento RFID de 10 s.
 `python simulador.py --sem-fechamento` imita o Pi com o fechamento bloqueado.
 
 ### 3. Publicar o dashboard
