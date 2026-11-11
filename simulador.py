@@ -16,6 +16,10 @@ Uso:
     python simulador.py --sem-fechamento   # imita o Pi com VAGA_FECHAMENTO_TESTE=0
     python simulador.py --bancada          # imita o fechamento RFID de 10 s (bancada)
     python simulador.py --parado           # só muda pelo teclado
+    python simulador.py --api-antiga --banco teste.db
+        # imita a API que roda no Pi hoje: vagas em /sensores/status, cancela
+        # em /status, sem /eventos e /permanencias (ficam só no SQLite).
+        # Rode o sincronizador com VAGA_DB_PATH=teste.db.
 
 Com o simulador rodando, digite + Enter:
     1 ou 2   troca a vaga        c   passa um cartão sorteado
@@ -25,6 +29,7 @@ Os cartões e nomes são falsos. Só usa a biblioteca padrão do Python.
 import argparse
 import json
 import random
+import sqlite3
 import threading
 import time
 from datetime import datetime
@@ -46,19 +51,42 @@ eventos = []
 permanencias = []
 rfid = {"ultima_leitura": None}
 auto = {"estado": "inativo", "fecha_em": None, "cancelamento": None}
-config = {"fechamento": True, "bancada": False}
+config = {"fechamento": True, "bancada": False, "antiga": False, "banco": None}
 
 
 def agora():
     return datetime.now().astimezone().isoformat(timespec="seconds")
 
 
+def preparar_banco(caminho):
+    """Mesmo esquema do SQLite do Pi (só as tabelas que o sincronizador lê)."""
+    with sqlite3.connect(caminho) as db:
+        db.execute("""CREATE TABLE IF NOT EXISTS eventos (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, horario TEXT NOT NULL,
+            tipo TEXT NOT NULL, descricao TEXT NOT NULL)""")
+        db.execute("""CREATE TABLE IF NOT EXISTS permanencias (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, vaga_id INTEGER NOT NULL,
+            entrada TEXT NOT NULL, saida TEXT NOT NULL,
+            duracao_segundos INTEGER NOT NULL)""")
+
+
+def salvar_no_banco(tabela, linha):
+    if not config["banco"]:
+        return
+    colunas = [c for c in linha if c != "id"]
+    with sqlite3.connect(config["banco"]) as db:
+        db.execute(
+            f"INSERT INTO {tabela} ({', '.join(colunas)}) VALUES ({', '.join('?' * len(colunas))})",
+            [linha[c] for c in colunas],
+        )
+
+
 def registrar(tipo, descricao):
     with lock:
-        eventos.append({
-            "id": len(eventos) + 1, "horario": agora(),
-            "tipo": tipo, "descricao": descricao,
-        })
+        linha = {"id": len(eventos) + 1, "horario": agora(),
+                 "tipo": tipo, "descricao": descricao}
+        eventos.append(linha)
+        salvar_no_banco("eventos", linha)
 
 
 def trocar_vaga(vaga_id):
@@ -67,11 +95,13 @@ def trocar_vaga(vaga_id):
         if v["ocupada"]:
             saida = agora()
             inicio = datetime.fromisoformat(v["entrada"])
-            permanencias.append({
+            linha = {
                 "id": len(permanencias) + 1, "vaga_id": vaga_id,
                 "entrada": v["entrada"], "saida": saida,
                 "duracao_segundos": max(0, int((datetime.fromisoformat(saida) - inicio).total_seconds())),
-            })
+            }
+            permanencias.append(linha)
+            salvar_no_banco("permanencias", linha)
             v["ocupada"], v["entrada"] = 0, None
             registrar("VAGA", f"Vaga {vaga_id} liberada")
         else:
@@ -199,8 +229,19 @@ class Handler(BaseHTTPRequestHandler):
         limite = int(parse_qs(url.query).get("limite", ["50"])[0])
         limite = max(1, min(limite, 500))
         with lock:
+            lista_vagas = [{"id": i, **v} for i, v in sorted(vagas.items())]
+            if config["antiga"]:
+                # Rotas da API que roda no Pi hoje (sem /vagas, /eventos...).
+                if url.path == "/status":
+                    return self._json(status_cancela())
+                if url.path == "/sensores/status":
+                    return self._json({"monitor_ativo": True, "vagas": lista_vagas})
+                if url.path == "/rfid/status":
+                    return self._json({"monitor_ativo": True,
+                                       "ultima_leitura": rfid["ultima_leitura"]})
+                return self._json({"detail": "Not Found"}, 404)
             if url.path == "/vagas":
-                return self._json([{"id": i, **v} for i, v in sorted(vagas.items())])
+                return self._json(lista_vagas)
             if url.path == "/cancela/status":
                 return self._json(status_cancela())
             if url.path == "/rfid/status":
@@ -234,10 +275,19 @@ def main():
                         help="fecha sozinho 10 s depois de um cartão autorizado")
     parser.add_argument("--parado", action="store_true",
                         help="não muda vagas nem passa cartões sozinho")
+    parser.add_argument("--api-antiga", action="store_true",
+                        help="imita as rotas da API que roda no Pi hoje")
+    parser.add_argument("--banco", help="grava eventos e permanências neste SQLite")
     parser.add_argument("--porta", type=int, default=8000)
     args = parser.parse_args()
     config["fechamento"] = not args.sem_fechamento
     config["bancada"] = args.bancada
+    config["antiga"] = args.api_antiga
+    if args.api_antiga and not args.banco:
+        parser.error("--api-antiga precisa de --banco (é de lá que o sincronizador lê o histórico)")
+    if args.banco:
+        config["banco"] = args.banco
+        preparar_banco(args.banco)
 
     if not args.parado:
         threading.Thread(target=mexer_sozinho, args=(lambda: trocar_vaga(random.choice([1, 2])), 8, 20),

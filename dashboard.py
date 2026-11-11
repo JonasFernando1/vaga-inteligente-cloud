@@ -357,7 +357,9 @@ def mostrar_rfid(sistema, online, sessao):
         st.write("Leitor: sem informação do Raspberry")
     else:
         st.write("Monitor:", "rodando" if sistema.get("rfid_monitor_ativo") else "parado")
-        st.write("Leitor RC522:", "conectado" if sistema.get("rfid_leitor_conectado") else "indisponível")
+        conectado = sistema.get("rfid_leitor_conectado")
+        if conectado is not None:  # a API antiga do Pi não informa
+            st.write("Leitor RC522:", "conectado" if conectado else "indisponível")
         if sistema.get("rfid_ultimo_erro"):
             st.caption("Último erro: " + str(sistema["rfid_ultimo_erro"]))
 

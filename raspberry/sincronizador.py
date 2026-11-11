@@ -14,13 +14,21 @@ conversa só por HTTP com a API local (127.0.0.1:8000) e com o Supabase.
 Se a internet ou a API cair, ele só registra no log e tenta de novo:
 sensores, RFID e cancela local continuam funcionando sem ele.
 
+Funciona com as duas versões da API do Raspberry:
+  - nova (raspberry/api.py): /vagas, /cancela/status, /eventos, /permanencias;
+  - antiga (a que roda no Pi desde out/2026): vagas em /sensores/status,
+    cancela em /status, e eventos/permanências lidos do SQLite em modo
+    SOMENTE LEITURA (o sincronizador nunca escreve no banco do Pi).
+
 Configuração (variáveis de ambiente ou arquivo .env.supabase ao lado deste script):
   SUPABASE_URL         https://SEU-PROJETO.supabase.co
   SUPABASE_SECRET_KEY  chave secreta (service_role / sb_secret_...)
   VAGA_API             padrão http://127.0.0.1:8000
+  VAGA_DB_PATH         padrão dados/estacionamento.db ao lado deste script
 """
 import logging
 import os
+import sqlite3
 import time
 from datetime import datetime
 from pathlib import Path
@@ -28,6 +36,12 @@ from pathlib import Path
 import requests
 
 log = logging.getLogger("sincronizador")
+# Falhas esperadas (rede, API, banco): registra e tenta de novo depois.
+FALHAS = (requests.RequestException, sqlite3.Error, KeyError, TypeError, ValueError)
+COLUNAS_SQLITE = {
+    "eventos": "id, horario, tipo, descricao",
+    "permanencias": "id, vaga_id, entrada, saida, duracao_segundos",
+}
 
 INTERVALO_COMANDOS = 1.5   # s entre buscas de comando
 INTERVALO_VAGAS = 2.0      # s entre leituras das vagas na API local
@@ -140,6 +154,14 @@ class ApiLocal:
         r.raise_for_status()
         return r.json()
 
+    def get_opcional(self, rota, **params):
+        """Como get, mas devolve None se a rota não existir (API antiga)."""
+        r = requests.get(self.base + rota, params=params or None, timeout=TIMEOUT)
+        if r.status_code == 404:
+            return None
+        r.raise_for_status()
+        return r.json()
+
     def post(self, rota):
         r = requests.post(self.base + rota, timeout=TIMEOUT)
         r.raise_for_status()
@@ -147,9 +169,11 @@ class ApiLocal:
 
 
 class Sincronizador:
-    def __init__(self, supabase: Supabase, api: ApiLocal):
+    def __init__(self, supabase: Supabase, api: ApiLocal, banco: Path):
         self.supabase = supabase
         self.api = api
+        self.banco = banco
+        self.avisos = set()
         self.vagas_enviadas = None
         self.ultimo_envio_vagas = 0.0
         self.status_enviado = None
@@ -172,11 +196,53 @@ class Sincronizador:
         if self.falhas.pop(etapa, None) is not None:
             log.info("%s voltou a funcionar", etapa)
 
+    def _avisar_uma_vez(self, mensagem):
+        if mensagem not in self.avisos:
+            self.avisos.add(mensagem)
+            log.info(mensagem)
+
+    # -- leitura da API local (nova ou antiga) -------------------------------
+    def ler_vagas(self):
+        vagas = self.api.get_opcional("/vagas")
+        if vagas is None:
+            self._avisar_uma_vez("API sem /vagas: usando /sensores/status (API antiga)")
+            vagas = self.api.get("/sensores/status")["vagas"]
+        return vagas
+
+    def ler_cancela(self):
+        cancela = self.api.get_opcional("/cancela/status")
+        if cancela is None:
+            self._avisar_uma_vez("API sem /cancela/status: usando /status (API antiga)")
+            status = self.api.get("/status")
+            # API nova põe a cancela dentro de "cancela"; a antiga devolve direto.
+            cancela = status.get("cancela", status)
+        return cancela
+
+    def ler_historico(self, tabela):
+        linhas = self.api.get_opcional(f"/{tabela}", limite=LIMITE_HISTORICO)
+        if linhas is None:
+            self._avisar_uma_vez(f"API sem /{tabela}: lendo do SQLite {self.banco} (somente leitura)")
+            linhas = self._ler_sqlite(tabela)
+        return linhas
+
+    def _ler_sqlite(self, tabela):
+        if not self.banco.exists():
+            raise sqlite3.OperationalError(f"banco não encontrado: {self.banco}")
+        db = sqlite3.connect(f"file:{self.banco}?mode=ro", uri=True, timeout=5)
+        try:
+            db.row_factory = sqlite3.Row
+            return [dict(l) for l in db.execute(
+                f"SELECT {COLUNAS_SQLITE[tabela]} FROM {tabela} ORDER BY id DESC LIMIT ?",
+                (LIMITE_HISTORICO,),
+            )]
+        finally:
+            db.close()
+
     # -- vagas ---------------------------------------------------------------
     def sincronizar_vagas(self):
         try:
-            vagas = self.api.get("/vagas")
-        except requests.RequestException as erro:
+            vagas = self.ler_vagas()
+        except FALHAS as erro:
             self._falhou("API local (vagas)", erro)
             return
         self._ok("API local (vagas)")
@@ -201,7 +267,7 @@ class Sincronizador:
         """Monta o status a partir da API local; None nos campos que falharem."""
         status = {"p_api_online": False}
         try:
-            cancela = self.api.get("/cancela/status")
+            cancela = self.ler_cancela()
             auto = cancela.get("fechamento_automatico_rfid") or {}
             status.update({
                 "p_api_online": True,
@@ -212,7 +278,7 @@ class Sincronizador:
                 "p_auto_segundos_restantes": auto.get("segundos_restantes"),
             })
             self._ok("API local (cancela)")
-        except requests.RequestException as erro:
+        except FALHAS as erro:
             self._falhou("API local (cancela)", erro)
         leitura = None
         try:
@@ -227,7 +293,7 @@ class Sincronizador:
                 # O UID fica só no Pi e nos eventos; aqui basta o que a tela mostra.
                 leitura = {k: ultima.get(k) for k in ("nome", "status", "mensagem", "horario")}
             self._ok("API local (RFID)")
-        except requests.RequestException as erro:
+        except FALHAS as erro:
             self._falhou("API local (RFID)", erro)
         return status, leitura
 
@@ -256,13 +322,13 @@ class Sincronizador:
                 self._falhou("Supabase (último cartão)", erro)
 
     # -- histórico -----------------------------------------------------------
-    def _copiar(self, nome, rota, chave_tempo, enviar):
+    def _copiar(self, nome, chave_tempo, enviar):
         try:
-            linhas = self.api.get(rota, limite=LIMITE_HISTORICO)
-        except requests.RequestException as erro:
-            self._falhou(f"API local ({nome})", erro)
+            linhas = self.ler_historico(nome)
+        except FALHAS as erro:
+            self._falhou(f"Leitura local ({nome})", erro)
             return
-        self._ok(f"API local ({nome})")
+        self._ok(f"Leitura local ({nome})")
         chaves = {(l["id"], l[chave_tempo]) for l in linhas}
         novas = [l for l in linhas if (l["id"], l[chave_tempo]) not in self.historico_enviado[nome]]
         if not novas:
@@ -278,8 +344,8 @@ class Sincronizador:
         log.info("%s: %d linha(s) conferida(s)/enviada(s)", nome.capitalize(), len(novas))
 
     def sincronizar_historico(self):
-        self._copiar("eventos", "/eventos", "horario", self.supabase.enviar_eventos)
-        self._copiar("permanencias", "/permanencias", "saida", self.supabase.enviar_permanencias)
+        self._copiar("eventos", "horario", self.supabase.enviar_eventos)
+        self._copiar("permanencias", "saida", self.supabase.enviar_permanencias)
 
     # -- comandos da cancela -------------------------------------------------
     def executar_comandos(self):
@@ -343,8 +409,12 @@ def main():
             "Defina SUPABASE_URL e SUPABASE_SECRET_KEY (veja .env.supabase.example)."
         )
     api = ApiLocal(os.environ.get("VAGA_API", "http://127.0.0.1:8000"))
+    banco = Path(os.environ.get(
+        "VAGA_DB_PATH",
+        str(Path(__file__).resolve().parent / "dados" / "estacionamento.db"),
+    ))
     try:
-        Sincronizador(Supabase(url, chave), api).rodar()
+        Sincronizador(Supabase(url, chave), api, banco).rodar()
     except KeyboardInterrupt:
         log.info("Encerrado")
 
