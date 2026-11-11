@@ -2,6 +2,7 @@
 .env
 .env.*
 !.env.example
+!.env.supabase.example
 .streamlit/secrets.toml
 **/.streamlit/secrets.toml
 *.key

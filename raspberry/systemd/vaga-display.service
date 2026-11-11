@@ -1,0 +1,18 @@
+[Unit]
+Description=Vaga Inteligente - Display OLED (vagas, cancela e cartões)
+After=vaga-api.service
+Wants=vaga-api.service
+
+[Service]
+Type=simple
+User=vaga
+WorkingDirectory=/home/vaga/vaga-inteligente
+ExecStart=/home/vaga/vaga-inteligente/venv/bin/python display_oled.py
+# Display de 128x32? Troque para OLED_ALTURA=32.
+Environment=OLED_ALTURA=64
+Environment=PYTHONUNBUFFERED=1
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

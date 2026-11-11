@@ -1,0 +1,18 @@
+[Unit]
+Description=Vaga Inteligente - Sincronizador com o Supabase (dashboard online)
+After=network-online.target vaga-api.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=vaga
+WorkingDirectory=/home/vaga/vaga-inteligente
+# Chaves do Supabase ficam SO no Raspberry, neste arquivo (nunca no Git).
+EnvironmentFile=/home/vaga/vaga-inteligente/.env.supabase
+ExecStart=/home/vaga/vaga-inteligente/venv/bin/python sincronizador.py
+Restart=always
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
