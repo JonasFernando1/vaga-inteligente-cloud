@@ -54,8 +54,9 @@ vaga-inteligente-cloud-main/
 | Agendar fechamento RFID em 10 s | Implementado somente no modo de bancada |
 | Confirmar ausência de carro por ultrassom | **Pendente; HC-SR04 ainda não foi validado** |
 | Fechamento físico seguro para trânsito real | **Não implementado** |
-| Dashboard online consultando Supabase | Arquivo original preservado; requer projeto/tabela existentes |
-| Publicar dados do SQLite no Supabase | **Não incluído**; requer sincronização/configuração separada |
+| Dashboard online consultando Supabase | Implementado (`dashboard.py`); tabelas em `supabase/schema.sql` |
+| Publicar vagas e status no Supabase | Implementado (`raspberry/sincronizador.py`, serviço `vaga-sync`) |
+| Abrir/fechar a cancela pelo dashboard online | Implementado com login; passa pelas mesmas travas da API local |
 
 ### Segurança da cancela
 
@@ -77,6 +78,70 @@ adequado.
 O SG90 não tem feedback de posição: a API informa a **posição comandada**, não
 que a haste chegou de fato ao destino. Use alimentação 5 V regulada separada
 para o servo, com terra comum ao Raspberry, e proteja a trajetória da haste.
+
+## Dashboard online (Supabase + Streamlit Cloud)
+
+```text
+Raspberry: api.py ◀─HTTP─ sincronizador.py ──▶ Supabase ◀── dashboard.py (Streamlit Cloud)
+                          (vaga-sync)          status_vagas, status_sistema, comandos_cancela
+```
+
+- O **sincronizador** é um processo separado: lê a API local (`/vagas` e
+  `/cancela/status`), envia ao Supabase e manda um sinal de vida a cada 10 s.
+  Não usa GPIO nem o SQLite; se a internet cair, sensores e cancela seguem
+  funcionando.
+- **Cancela pelo dashboard:** o usuário logado cria um comando em
+  `comandos_cancela`; o sincronizador o busca (a cada 1,5 s) e chama
+  `POST /cancela/abrir` ou `/cancela/fechar` na API local. Valem as mesmas
+  travas da API: **fechar continua bloqueado sem `VAGA_FECHAMENTO_TESTE=1`**.
+  Comando com mais de 20 s expira no servidor, para que um clique antigo não
+  mova a cancela quando o Pi voltar a ter internet.
+- Chaves: o dashboard usa só a chave **pública** (anon/publishable), que
+  apenas lê; o login libera criar comandos. A chave **secreta** fica somente
+  no Raspberry, em `.env.supabase`.
+
+### 1. Supabase (uma vez)
+
+1. **SQL Editor → New query**: cole `supabase/schema.sql` e rode.
+2. **Authentication → Users → Add user**: crie o usuário (e-mail e senha) que
+   vai controlar a cancela. Desligue o cadastro público em
+   **Authentication → Sign In / Providers → Allow new users to sign up**, para
+   que ninguém crie uma conta sozinho.
+3. **Project Settings → API Keys**: anote a URL, a chave pública e a secreta.
+
+### 2. Testar no PC, sem o Raspberry
+
+```bash
+pip install streamlit requests
+cp raspberry/.env.supabase.example raspberry/.env.supabase          # preencher URL + chave secreta
+cp .streamlit/secrets.toml.example .streamlit/secrets.toml  # preencher URL + chave pública
+
+python simulador.py                    # terminal 1: API falsa em 127.0.0.1:8000
+python raspberry/sincronizador.py      # terminal 2: mesma ponte que roda no Pi
+streamlit run dashboard.py             # terminal 3: dashboard em localhost:8501
+```
+
+No terminal do simulador, digite `1` ou `2` + Enter para trocar a vaga.
+`python simulador.py --sem-fechamento` imita o Pi com o fechamento bloqueado.
+
+### 3. Publicar o dashboard
+
+[share.streamlit.io](https://share.streamlit.io) → **Create app** → este
+repositório, branch `main`, arquivo `dashboard.py`. Em **Advanced settings →
+Secrets**, cole o conteúdo do seu `.streamlit/secrets.toml`.
+
+### 4. Ligar no Raspberry
+
+```bash
+bash raspberry/scripts/atualizar_raspberry.sh     # copia sincronizador.py
+cp raspberry/.env.supabase.example ~/vaga-inteligente/.env.supabase
+nano ~/vaga-inteligente/.env.supabase                 # URL + chave secreta
+chmod 600 ~/vaga-inteligente/.env.supabase
+sudo cp raspberry/systemd/vaga-sync.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now vaga-sync.service
+sudo journalctl -u vaga-sync.service -f           # ver o que ele está enviando
+```
 
 ## Publicar no GitHub
 
