@@ -136,8 +136,13 @@ Secrets**, cole o conteúdo do seu `.streamlit/secrets.toml`.
 
 ### 4. Ligar no Raspberry
 
+Copie **só** os programas novos: o `atualizar_raspberry.sh` copia todos os
+`.py` e substituiria a API que já roda no Pi (que é uma versão diferente da
+deste repositório). O sincronizador e o display funcionam com as duas.
+
 ```bash
-bash raspberry/scripts/atualizar_raspberry.sh     # copia sincronizador.py
+cd ~/vaga-inteligente-cloud-main && git pull
+cp raspberry/sincronizador.py raspberry/display_oled.py ~/vaga-inteligente/
 cp raspberry/.env.supabase.example ~/vaga-inteligente/.env.supabase
 nano ~/vaga-inteligente/.env.supabase                 # URL + chave secreta
 chmod 600 ~/vaga-inteligente/.env.supabase
@@ -146,6 +151,24 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now vaga-sync.service
 sudo journalctl -u vaga-sync.service -f           # ver o que ele está enviando
 ```
+
+### 5. Display OLED
+
+`raspberry/display_oled.py` mostra vagas livres, estado de cada vaga e da
+cancela e, por 5 s depois de cada cartão, LIBERADO / NEGADO / LOTADO com o
+nome. Só lê a API local. Precisa do I²C ligado (`i2cdetect -y 1` mostra `3c`)
+e do `luma.oled` no venv.
+
+```bash
+~/vaga-inteligente/venv/bin/pip install luma.oled
+sudo cp ~/vaga-inteligente-cloud-main/raspberry/systemd/vaga-display.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now vaga-display.service
+```
+
+Display de 128x32: troque `OLED_ALTURA=64` por `32` no `.service`. Para ver as
+telas no PC sem display: `OLED_TESTE=tela.png python raspberry/display_oled.py`
+(com o simulador rodando).
 
 ## Publicar no GitHub
 
@@ -264,7 +287,7 @@ Substitua `123456789` pelo UID real. O cadastro fica somente no SQLite local.
 | RC522 SCK / MOSI / MISO | 11 / 10 / 9 | SPI |
 | RC522 RST | 25 | Alimentar RC522 em **3,3 V** |
 | HC-SR04 TRIG / ECHO | 23 / 24 | ECHO exige conversão 5 V → 3,3 V; leitura pendente |
-| OLED SDA / SCL | 2 / 3 | I²C; integração pendente |
+| OLED SDA / SCL | 2 / 3 | I²C 0x3C; `display_oled.py` (serviço `vaga-display`) |
 
 ## Testes offline
 
