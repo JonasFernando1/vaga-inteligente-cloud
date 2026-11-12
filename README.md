@@ -18,11 +18,12 @@ Sistema de controle de acesso a um estacionamento com **2 vagas**, desenvolvido 
 
 ## Foto do Projeto
 
-<!-- Coloque aqui a foto nova do projeto -->
+<img width="900" alt="Foto do projeto" src="docs/foto-projeto.webp" />
 
-## Vídeo do Projeto
+## Vídeos do Projeto
 
-[Link do Vídeo](COLOQUE-O-LINK-AQUI)
+- [Vídeo T2](https://youtube.com/shorts/URGSttZpG8Y)
+- [Vídeo T3](https://youtube.com/shorts/-uQZPaxQTE4)
 
 ## 📋 Sumário
 
@@ -64,19 +65,19 @@ Estacionamentos sem automação exigem funcionários para controle de acesso e n
 |---|---|
 | Raspberry Pi 4B | Processamento, API local, banco de dados e sincronização com a nuvem |
 | Leitor RFID MFRC522 | Identificação do usuário por cartão/tag |
-| Display OLED I2C SSD1306 | Exibição de mensagens ao usuário |
+| Display OLED I2C SSD1306 (128×32) | Exibição de mensagens ao usuário |
 | 2× Sensor de Obstáculo IR | Detecção de ocupação nas vagas |
 | Sensor Ultrassônico HC-SR04 | Segurança da cancela |
 | Conversor de Nível Lógico | Compatibilidade 5V→3,3V (ECHO do HC-SR04) |
-| Servo Motor SG90 | Acionamento mecânico da cancela |
-| Fonte 5V separada | Alimentação do servo (terra comum com o Pi) |
+| Servo Motor MG996 | Acionamento mecânico da cancela |
+| Fonte USB 5V | Alimentação do Raspberry Pi 4B |
 | Protoboard + Jumpers | Montagem do circuito |
 
 ---
 
 ## 🗂️ Diagrama de Blocos
 
-<!-- Coloque aqui o diagrama de blocos novo -->
+![Diagrama de Blocos](docs/diagrama-blocos.jpg)
 
 ---
 
@@ -130,11 +131,11 @@ Raspberry Pi 4B                                        Nuvem
 
 > ⚠️ O ECHO do HC-SR04 retorna 5V. **Não conectar diretamente ao Raspberry.** Use o conversor de nível lógico.
 
-### Servo SG90 (Cancela)
+### Servo MG996 (Cancela)
 | Fio | Conexão |
 |---|---|
-| Marrom/Preto | GND (comum com o Pi) |
-| Vermelho | 5V da fonte separada |
+| Marrom/Preto | GND |
+| Vermelho | 5V |
 | Laranja/Amarelo | GPIO18 (pino 12) |
 
 ### Sensores de Obstáculo IR (Vagas)
@@ -211,7 +212,7 @@ vaga-inteligente-cloud/
     ├── api.py                   # API local (FastAPI, porta 8000)
     ├── banco.py                 # SQLite: vagas, eventos, permanências e cartões
     ├── controlador.py           # Regras da cancela
-    ├── servo_cancela.py         # Servo SG90
+    ├── servo_cancela.py         # Servo da cancela
     ├── leitor_rfid.py           # Leitor RFID MFRC522
     ├── sensores_ir.py           # Sensores IR das vagas
     ├── sensor_ultrassonico.py   # HC-SR04
@@ -231,7 +232,7 @@ vaga-inteligente-cloud/
 
 ## ⚠️ Limitações
 
-- O SG90 não tem feedback de posição: o sistema informa a posição **comandada**, não a confirmação de que a haste chegou ao destino.
+- O servo não tem feedback de posição: o sistema informa a posição **comandada**, não a confirmação de que a haste chegou ao destino.
 
 ---
 
