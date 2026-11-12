@@ -32,6 +32,7 @@ Sistema de controle de acesso a um estacionamento com **2 vagas**, desenvolvido 
 - [Hardware](#-hardware)
 - [Diagrama de Blocos](#️-diagrama-de-blocos)
 - [Arquitetura do Software](#️-arquitetura-do-software)
+- [Banco de Dados na Nuvem](#️-banco-de-dados-na-nuvem-supabase)
 - [Pinagem](#-pinagem-raspberry-pi-4b)
 - [Como Rodar](#-como-rodar)
 - [Estrutura do Repositório](#-estrutura-do-repositório)
@@ -97,6 +98,23 @@ Raspberry Pi 4B                                        Nuvem
 - O **sincronizador** lê a API local e envia ao Supabase o que mudou, com um sinal de vida a cada 10 s. Se a internet cair, sensores e cancela continuam funcionando.
 - **Cancela pelo dashboard:** o usuário logado cria um comando no Supabase; o Pi o busca a cada 1,5 s e o executa com as mesmas travas da API local. Comandos com mais de 20 s expiram, para que um clique antigo não mova a cancela quando o Pi voltar a ficar online.
 - O dashboard usa só a chave **pública** do Supabase; a chave secreta fica apenas no Raspberry.
+
+---
+
+## 🗄️ Banco de Dados na Nuvem (Supabase)
+
+![Tabelas do Supabase](docs/supabase-tabelas.png)
+
+| Tabela | Conteúdo |
+|---|---|
+| `status_vagas` | Situação atual de cada vaga (ocupada e horário de entrada) |
+| `status_sistema` | Sinal de vida do Pi, estado da cancela e do leitor RFID |
+| `status_privado` | Última leitura RFID (só visível com login, pois tem nomes) |
+| `eventos` | Histórico de eventos do sistema (RFID, cancela, vagas) |
+| `permanencias` | Entrada, saída e duração de cada carro nas vagas |
+| `comandos_cancela` | Fila de comandos de abrir/fechar enviados pelo dashboard |
+
+O esquema completo está em [`supabase/schema.sql`](supabase/schema.sql).
 
 ---
 
