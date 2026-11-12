@@ -1,9 +1,10 @@
 
+import os
 import sqlite3
 from pathlib import Path
 from datetime import datetime
 
-CAMINHO_BANCO = Path(__file__).parent / "dados" / "estacionamento.db"
+CAMINHO_BANCO = Path(os.environ.get("VAGA_DB_PATH", Path(__file__).parent / "dados" / "estacionamento.db"))
 CAMINHO_BANCO.parent.mkdir(exist_ok=True)
 
 
@@ -179,16 +180,16 @@ def listar_eventos():
         ]
 
 
-def cadastrar_cartao(uid, nome):
+def cadastrar_cartao(uid, nome, autorizado=True):
     with conectar() as db:
         db.execute(
             """INSERT INTO cartoes_rfid
                (uid, nome, autorizado)
-               VALUES (?, ?, 1)
+               VALUES (?, ?, ?)
                ON CONFLICT(uid) DO UPDATE SET
                    nome = excluded.nome,
-                   autorizado = 1""",
-            (uid, nome)
+                   autorizado = excluded.autorizado""",
+            (uid, nome, int(autorizado))
         )
 
 
